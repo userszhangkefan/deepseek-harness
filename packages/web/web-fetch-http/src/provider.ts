@@ -29,6 +29,27 @@ export interface HttpFetchLimits {
   userAgent: string
 }
 
+/**
+ * Cut `text` to at most `max` UTF-16 code units without splitting a surrogate
+ * pair. `String.prototype.slice` counts code units, so it can end on an
+ * unpaired high surrogate whenever the cap lands between the two halves of an
+ * astral character. That lone code unit is not valid Unicode: it survives into
+ * the session history and makes the JSON request body sent to the model
+ * unparseable, which the gateway rejects as a 400. Dropping the pair keeps the
+ * cap a hard bound while leaving the text well-formed UTF-16.
+ *
+ * @param text - the decoded body to bound.
+ * @param max - the maximum number of code units to keep.
+ * @returns `text` when it already fits, otherwise a well-formed prefix.
+ */
+function truncateText(text: string, max: number): string {
+  if (text.length <= max) return text
+  const last = text.charCodeAt(max - 1)
+  const next = text.charCodeAt(max)
+  const splitsPair = last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff
+  return text.slice(0, splitsPair ? max - 1 : max)
+}
+
 /** Resolve one hostname to an already policy-validated address set. */
 export type HttpFetchResolver = (hostname: string, signal: AbortSignal) => Promise<PublicAddress[]>
 
@@ -165,7 +186,7 @@ export class HttpFetchProvider implements WebFetchProvider {
     const { bytes, truncatedByBytes } = await this.readCapped(response, signal)
     const decoded = decoder.decode(bytes)
     const truncatedByChars = decoded.length > this.limits.maxBodyChars
-    const content = truncatedByChars ? decoded.slice(0, this.limits.maxBodyChars) : decoded
+    const content = truncatedByChars ? truncateText(decoded, this.limits.maxBodyChars) : decoded
     const body: WebFetchBody = kind === 'html' ? { kind: 'html', content } : { kind: 'text', content }
 
     return {

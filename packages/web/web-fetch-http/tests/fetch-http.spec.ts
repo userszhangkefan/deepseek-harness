@@ -323,6 +323,19 @@ describe('HttpFetchProvider caps', () => {
     expect(result.truncated).toBe(true)
   })
 
+  it('does not end a character-capped body on an unpaired surrogate', async () => {
+    // The emoji straddles the cap: its high surrogate is the last unit a code-unit
+    // slice would keep, leaving an unpaired code unit that the model gateway
+    // rejects as an unparseable JSON body. The pair is dropped whole instead.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(`${'a'.repeat(99_999)}🎙️`)
+    }
+    const result = await provider().fetch({ url: base })
+    expect(result.truncated).toBe(true)
+    expect(result.body.content).toBe('a'.repeat(99_999))
+  })
+
   it('rejects an unsupported content type', async () => {
     handler = (_req, res) => { res.writeHead(200, { 'content-type': 'image/png' }); res.end('binary') }
     await expect(provider().fetch({ url: base }))

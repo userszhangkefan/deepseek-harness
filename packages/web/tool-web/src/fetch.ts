@@ -240,7 +240,7 @@ interface RenderedBody {
  *   raw active markup never reaches the model-facing result.
  */
 function renderBody(body: WebFetchBody, maxInputChars: number): RenderedBody {
-  const content = body.content.slice(0, maxInputChars)
+  const content = boundText(body.content, maxInputChars)
   const sourceTruncated = content.length !== body.content.length
   switch (body.kind) {
     case 'html':
@@ -263,6 +263,52 @@ function renderBody(body: WebFetchBody, maxInputChars: number): RenderedBody {
 
 /** The truncation notice appended when the provider or the output cap cut content. */
 const TRUNCATION_FOOTER = '\n\n(Content truncated. Fetch a more specific URL or section for the full text.)'
+
+/**
+ * Unpaired surrogate code units. The `u` flag is what makes this the LONE ones:
+ * in Unicode mode a well-formed pair is a single astral code point outside
+ * D800–DFFF, so an emoji survives untouched.
+ */
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u
+
+/**
+ * Bound `text` to `max` UTF-16 code units without splitting a surrogate pair.
+ * Every cut here is expressed in code units, so a cap landing between the two
+ * halves of an astral character would leave an unpaired high surrogate, which
+ * is not valid Unicode and reaches the model as a JSON request body the gateway
+ * cannot parse. Dropping the pair keeps the cap a hard bound.
+ *
+ * @param text - the text to bound.
+ * @param max - the maximum number of code units to keep.
+ * @returns `text` when it already fits, otherwise a well-formed prefix.
+ */
+function boundText(text: string, max: number): string {
+  if (text.length <= max) return text
+  const last = text.charCodeAt(max - 1)
+  const next = text.charCodeAt(max)
+  const splitsPair = last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff
+  return text.slice(0, splitsPair ? max - 1 : max)
+}
+
+/**
+ * Replace unpaired surrogate code units with U+FFFD so the model-facing text is
+ * always well-formed UTF-16. {@link boundText} already keeps our own cuts clean,
+ * but a provider or the DOM conversion can still hand back text split mid-pair;
+ * an unpaired surrogate in session history poisons every later request, so the
+ * output is sanitized regardless of where it came from.
+ *
+ * @param text - the rendered fetch output.
+ * @returns `text` unchanged when well-formed, otherwise with U+FFFD substituted.
+ */
+function wellFormed(text: string): string {
+  if (!LONE_SURROGATE.test(text)) return text
+  let sanitized = ''
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0
+    sanitized += code >= 0xd800 && code <= 0xdfff ? '\uFFFD' : character
+  }
+  return sanitized
+}
 
 /** A rendered fetch output: the model-facing text and its effective truncation. */
 interface RenderedFetch {
@@ -331,9 +377,11 @@ function computeFetchOutput(result: WebFetchResult, maxOutputChars: number): Ren
   const prefix = `${header}${rendered.text}`
   const truncated = result.truncated || rendered.sourceTruncated || prefix.length > maxOutputChars
   const full = `${prefix}${truncated ? TRUNCATION_FOOTER : ''}`
-  if (full.length <= maxOutputChars) return { text: full, truncated }
-  if (maxOutputChars < TRUNCATION_FOOTER.length) return { text: full.slice(0, maxOutputChars), truncated }
-  return { text: `${prefix.slice(0, maxOutputChars - TRUNCATION_FOOTER.length)}${TRUNCATION_FOOTER}`, truncated }
+  if (full.length <= maxOutputChars) return { text: wellFormed(full), truncated }
+  const bounded = maxOutputChars < TRUNCATION_FOOTER.length
+    ? boundText(full, maxOutputChars)
+    : `${boundText(prefix, maxOutputChars - TRUNCATION_FOOTER.length)}${TRUNCATION_FOOTER}`
+  return { text: wellFormed(bounded), truncated }
 }
 
 /**

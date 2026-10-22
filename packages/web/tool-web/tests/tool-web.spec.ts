@@ -225,6 +225,18 @@ describe('fetch formatting', () => {
     expect(out).toContain('Content truncated')
   })
 
+  it('replaces an unpaired surrogate instead of emitting it', () => {
+    // A provider cap or the DOM conversion can split an astral character; the
+    // lone code unit must never reach session history, where it would make every
+    // later request body invalid Unicode.
+    const out = formatFetchOutput({
+      url: 'https://a.test', statusCode: 200, truncated: false,
+      body: { kind: 'text', content: 'before\uD83Cafter' },
+    }, NO_CAP)
+    expect(/[\uD800-\uDFFF]/u.test(out)).toBe(false)
+    expect(out).toContain('\uFFFD')
+  })
+
   it('caps the complete output and notes truncation, even when markdown escaping expands the body', () => {
     // 1,000 underscores render as 2,000 escaped characters — conversion can
     // outgrow a provider-side body cap, so the bound applies to the output.
